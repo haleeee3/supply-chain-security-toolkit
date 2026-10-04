@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# =============================================================
+# 표준 PoC 실행 스크립트 템플릿
+# docker run을 직접 호출하지 말고, 이 스크립트를 통해서만 실행할 것.
+# (네트워크 격리, 리소스 제한, 스냅샷 생성이 기본 적용됨)
+# =============================================================
+
+set -euo pipefail
+
+CVE_ID="${1:?사용법: ./run.sh <CVE-ID>}"
+COMPOSE_FILE="./docker-compose.yml"
+
+echo "[*] ${CVE_ID} 테스트 환경 빌드 중..."
+CVE_ID="${CVE_ID}" docker compose -f "${COMPOSE_FILE}" build
+
+echo "[*] 격리 네트워크(internal: true) 확인..."
+docker network inspect "$(basename "$(pwd)")_isolated" 2>/dev/null \
+  | grep -q '"Internal": true' \
+  && echo "    OK: 외부 네트워크 차단 확인됨" \
+  || { echo "    [경고] 격리 네트워크 설정을 확인하세요"; exit 1; }
+
+echo "[*] 컨테이너 기동..."
+CVE_ID="${CVE_ID}" docker compose -f "${COMPOSE_FILE}" up -d victim
+
+echo "[*] victim 컨테이너 로그 스트리밍 (Ctrl+C로 중단 가능, 컨테이너는 유지됨)"
+docker compose -f "${COMPOSE_FILE}" logs -f victim &
+LOG_PID=$!
+
+echo ""
+echo "다음 명령으로 attacker 컨테이너에서 PoC 스크립트를 수동 실행하세요:"
+echo "  docker compose -f ${COMPOSE_FILE} exec attacker bash"
+echo "  (컨테이너 안에서) /poc-scripts/ 안의 스크립트 실행"
+echo ""
+echo "검증이 끝나면 다음으로 정리:"
+echo "  docker compose -f ${COMPOSE_FILE} down -v"
+
+wait $LOG_PID

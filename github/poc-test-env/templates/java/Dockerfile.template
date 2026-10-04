@@ -1,0 +1,36 @@
+# =============================================================
+# Java PoC 재현용 표준 Dockerfile 템플릿
+#
+# 사용법:
+#   1) 아래 ARG 값들을 해당 CVE의 취약 버전에 맞게 채운다
+#   2) src/ 디렉토리에 PoC가 요구하는 최소 앱 코드(또는 PoC 저장소 clone본)를 넣는다
+#   3) 빌드: docker build -t poc-{CVE-ID} .
+#   4) 실행: 반드시 run.sh (격리 네트워크)를 통해서만 실행 — docker run 직접 호출 금지
+#
+# ⚠️ 실행 전 반드시 src/ 안의 코드를 사람이 직접 읽고 검토할 것.
+# =============================================================
+
+ARG JDK_VERSION=8
+FROM eclipse-temurin:${JDK_VERSION}-jdk
+
+# ---- 취약 버전 정보 (문서화 목적, 실제 반영은 pom.xml/build.gradle에서) ----
+ARG CVE_ID=CVE-YYYY-NNNNN
+ARG VULNERABLE_PACKAGE=group:artifact
+ARG VULNERABLE_VERSION=0.0.0
+LABEL cve="${CVE_ID}" \
+      vulnerable_package="${VULNERABLE_PACKAGE}" \
+      vulnerable_version="${VULNERABLE_VERSION}"
+
+WORKDIR /app
+
+# Maven 사용 시 (Gradle 프로젝트면 이 블록을 gradle 빌드로 교체)
+COPY src/pom.xml ./pom.xml
+COPY src/app ./app
+RUN mvn -f pom.xml package -DskipTests
+
+# ---- 최소 권한 실행 계정 ----
+RUN useradd -m -u 10001 pocuser
+USER pocuser
+
+# ---- 기본 실행 커맨드 (CVE별로 override) ----
+CMD ["java", "-jar", "target/vuln-app.jar"]

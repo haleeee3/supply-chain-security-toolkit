@@ -1,0 +1,36 @@
+# =============================================================
+# Node.js PoC 재현용 표준 Dockerfile 템플릿
+#
+# 사용법:
+#   1) src/package.json + package-lock.json 에 취약 버전을 정확히 pin
+#   2) src/app/ 에 PoC가 요구하는 최소 앱 코드를 넣는다
+#   3) 빌드: docker build -t poc-{CVE-ID} .
+#   4) 실행: run.sh (격리 네트워크)를 통해서만 실행
+#
+# ⚠️ 실행 전 반드시 src/ 안의 코드를 사람이 직접 읽고 검토할 것.
+#    (prototype pollution류는 애플리케이션 로직과 결합되어야 트리거되므로
+#     PoC 저장소가 제공하는 샘플 앱을 그대로 쓰는 걸 권장)
+# =============================================================
+
+ARG NODE_VERSION=18
+FROM node:${NODE_VERSION}-slim
+
+ARG CVE_ID=CVE-YYYY-NNNNN
+ARG VULNERABLE_PACKAGE=package-name
+ARG VULNERABLE_VERSION=0.0.0
+LABEL cve="${CVE_ID}" \
+      vulnerable_package="${VULNERABLE_PACKAGE}" \
+      vulnerable_version="${VULNERABLE_VERSION}"
+
+WORKDIR /app
+
+COPY src/package.json src/package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY src/app ./app
+
+# ---- 최소 권한 실행 계정 (node 이미지는 기본 'node' 계정 내장) ----
+USER node
+
+# ---- 기본 실행 커맨드 (CVE별로 override) ----
+CMD ["node", "app/index.js"]
