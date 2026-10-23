@@ -1,12 +1,21 @@
 name: Supply Chain Security Scan
 
+# 수정: 특정 파일 변경시만 실행
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'requirements.txt'    # 의존성 변경시만
+      - '.github/workflows/**'
+  workflow_dispatch:           # ← 수동 실행 버튼 추가!
   pull_request:
     branches: [ main ]
   schedule:
-    - cron: '0 9 * * 1'  # 매주 월요일 오전 9시 자동 실행
+    - cron: '0 9 * * 1'
+
+permissions:          # ← 이거 추가!
+  issues: write
+  contents: read
 
 jobs:
   security-scan:
