@@ -32,8 +32,8 @@ jobs:
 
       - name: CVE 스캔
         run: |
-          grype sbom:sbom.json -o json > cve-results.json
-          grype sbom:sbom.json -o table
+          grype sbom:sbom.json --by-cve -o json > cve-results.json
+          grype sbom:sbom.json --by-cve -o table
           echo "✅ CVE 스캔 완료"
 
       - name: EPSS 점수 조회 및 우선순위 분류
