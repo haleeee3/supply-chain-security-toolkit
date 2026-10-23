@@ -1,37 +1,52 @@
 name: Supply Chain Security Scan
 
-# 수정: 특정 파일 변경시만 실행
 on:
   push:
     branches: [ main ]
     paths:
-      - 'requirements.txt'    # 의존성 변경시만
-      - '.github/workflows/**'
-  workflow_dispatch:           # ← 수동 실행 버튼 추가!
-  pull_request:
-    branches: [ main ]
+      - 'requirements.txt'
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 0 * * *'  # 매일 새벽 Grype DB 갱신
+  workflow_dispatch:
 
-permissions:          # ← 이거 추가!
+permissions:
   issues: write
   contents: read
 
 jobs:
   security-scan:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
 
-      - name: Syft 설치 (SBOM 생성)
+      - name: Syft 설치
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: Grype 설치 (CVE 스캔)
+      - name: Grype 설치
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Grype DB 캐시 로드
+        uses: actions/cache@v4
+        id: grype-db-cache
+        with:
+          path: ~/.cache/grype/db
+          key: grype-db-${{ runner.os }}-${{ steps.date.outputs.date }}
+          restore-keys: |
+            grype-db-${{ runner.os }}-
+
+      - name: 날짜 가져오기 (캐시 키용)
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Grype DB 업데이트
+        if: steps.grype-db-cache.outputs.cache-hit != 'true'
+        run: |
+          grype db update
+          echo "✅ Grype DB 업데이트 완료"
 
       - name: SBOM 생성
         run: |
@@ -44,74 +59,6 @@ jobs:
           grype sbom:sbom.json --by-cve -o json > cve-results.json
           grype sbom:sbom.json --by-cve -o table
           echo "✅ CVE 스캔 완료"
-
-      - name: EPSS 점수 조회 및 우선순위 분류
-        run: |
-          python3 << 'EOF'
-          import json
-          import urllib.request
-
-          with open('cve-results.json') as f:
-              data = json.load(f)
-
-          matches = data.get('matches', [])
-          
-          # CVE ID 목록 추출
-          cve_ids = list(set([
-              m['vulnerability']['id'] 
-              for m in matches 
-              if m['vulnerability']['id'].startswith('CVE-')
-          ]))
-
-          if not cve_ids:
-              print("CVE 없음")
-              exit(0)
-
-          # EPSS API 호출 (최대 100개씩)
-          chunk = cve_ids[:100]
-          query = ','.join(chunk)
-          url = f"https://api.first.org/data/v1/epss?cve={query}"
-          
-          with urllib.request.urlopen(url) as res:
-              epss_data = json.load(res)
-
-          # 결과 정리
-          epss_map = {
-              item['cve']: float(item['epss']) 
-              for item in epss_data.get('data', [])
-          }
-
-          # 우선순위 분류
-          critical_epss = []
-          for m in matches:
-              cve_id = m['vulnerability']['id']
-              severity = m['vulnerability'].get('severity', 'Unknown')
-              epss = epss_map.get(cve_id, 0)
-              
-              if severity in ['Critical', 'High'] and epss > 0.1:
-                  critical_epss.append({
-                      'cve': cve_id,
-                      'severity': severity,
-                      'epss': f"{epss*100:.2f}%"
-                  })
-
-          print(f"\n🚨 즉시 조치 필요 (Critical/High + EPSS > 10%):")
-          if critical_epss:
-              for item in critical_epss:
-                  print(f"  {item['cve']} | {item['severity']} | EPSS: {item['epss']}")
-          else:
-              print("  없음")
-
-          # 결과 저장
-          with open('epss-results.json', 'w') as f:
-              json.dump(critical_epss, f, indent=2)
-          EOF
-
-      - name: EPSS 결과 아티팩트 저장
-        uses: actions/upload-artifact@v4
-        with:
-          name: epss-results
-          path: epss-results.json
 
       - name: Critical/High CVE 확인
         run: |
@@ -127,13 +74,70 @@ jobs:
             echo "⚠️ 심각한 취약점 발견!"
           fi
 
-      - name: SBOM/CVE 결과 아티팩트 저장
+      - name: EPSS 점수 조회 및 우선순위 분류
+        run: |
+          python3 << 'EOF'
+          import json
+          import urllib.request
+
+          with open('cve-results.json') as f:
+              data = json.load(f)
+
+          matches = data.get('matches', [])
+          cve_ids = list(set([
+              m['vulnerability']['id']
+              for m in matches
+              if m['vulnerability']['id'].startswith('CVE-')
+          ]))
+
+          if not cve_ids:
+              print("CVE 없음")
+              exit(0)
+
+          chunk = cve_ids[:100]
+          query = ','.join(chunk)
+          url = f"https://api.first.org/data/v1/epss?cve={query}"
+
+          with urllib.request.urlopen(url) as res:
+              epss_data = json.load(res)
+
+          epss_map = {
+              item['cve']: float(item['epss'])
+              for item in epss_data.get('data', [])
+          }
+
+          critical_epss = []
+          for m in matches:
+              cve_id = m['vulnerability']['id']
+              severity = m['vulnerability'].get('severity', 'Unknown')
+              epss = epss_map.get(cve_id, 0)
+
+              if severity in ['Critical', 'High'] and epss > 0.1:
+                  critical_epss.append({
+                      'cve': cve_id,
+                      'severity': severity,
+                      'epss': f"{epss*100:.2f}%"
+                  })
+
+          print(f"\n🚨 즉시 조치 필요 (Critical/High + EPSS > 10%):")
+          if critical_epss:
+              for item in critical_epss:
+                  print(f"  {item['cve']} | {item['severity']} | EPSS: {item['epss']}")
+          else:
+              print("  없음")
+
+          with open('epss-results.json', 'w') as f:
+              json.dump(critical_epss, f, indent=2)
+          EOF
+
+      - name: SBOM/CVE/EPSS 결과 아티팩트 저장
         uses: actions/upload-artifact@v4
         with:
           name: security-scan-results
           path: |
             sbom.json
             cve-results.json
+            epss-results.json
 
       - name: GitHub Issues 자동 생성
         if: always()
@@ -143,13 +147,11 @@ jobs:
           python3 << 'EOF'
           import json
           import urllib.request
-          import urllib.parse
           import os
 
           token = os.environ['GH_TOKEN']
           repo = os.environ['GITHUB_REPOSITORY']
 
-          # EPSS 결과 로드
           try:
               with open('epss-results.json') as f:
                   urgent_cves = json.load(f)
@@ -180,7 +182,7 @@ jobs:
 
               data = json.dumps({
                   'title': title,
-                  'body': body,
+                  'body': body
               }).encode()
 
               req = urllib.request.Request(
@@ -198,7 +200,7 @@ jobs:
                       result = json.load(res)
                       print(f"✅ Issue 생성됨: {result['html_url']}")
               except Exception as e:
-                import traceback
-                print(f"⚠️ Issue 생성 실패: {e}")
-                traceback.print_exc()
+                  import traceback
+                  print(f"⚠️ Issue 생성 실패: {e}")
+                  traceback.print_exc()
           EOF
