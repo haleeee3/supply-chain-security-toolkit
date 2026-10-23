@@ -1,0 +1,59 @@
+name: Supply Chain Security Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 9 * * 1'  # 매주 월요일 오전 9시 자동 실행
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Syft 설치 (SBOM 생성)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Grype 설치 (CVE 스캔)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: SBOM 생성
+        run: |
+          syft . -o json > sbom.json
+          syft . -o table
+          echo "✅ SBOM 생성 완료"
+
+      - name: CVE 스캔
+        run: |
+          grype sbom:sbom.json -o json > cve-results.json
+          grype sbom:sbom.json -o table
+          echo "✅ CVE 스캔 완료"
+
+      - name: Critical/High CVE 확인
+        run: |
+          CRITICAL=$(cat cve-results.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          matches = data.get('matches', [])
+          critical = [m for m in matches if m.get('vulnerability', {}).get('severity') in ['Critical', 'High']]
+          print(len(critical))
+          ")
+          echo "🚨 Critical/High CVE 수: $CRITICAL"
+          if [ "$CRITICAL" -gt "0" ]; then
+            echo "⚠️ 심각한 취약점 발견!"
+          fi
+
+      - name: SBOM/CVE 결과 아티팩트 저장
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-results
+          path: |
+            sbom.json
+            cve-results.json
