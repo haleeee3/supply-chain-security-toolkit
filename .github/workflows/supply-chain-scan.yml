@@ -125,3 +125,70 @@ jobs:
           path: |
             sbom.json
             cve-results.json
+
+      - name: GitHub Issues 자동 생성
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 << 'EOF'
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          token = os.environ['GH_TOKEN']
+          repo = os.environ['GITHUB_REPOSITORY']
+
+          # EPSS 결과 로드
+          try:
+              with open('epss-results.json') as f:
+                  urgent_cves = json.load(f)
+          except:
+              print("EPSS 결과 없음")
+              exit(0)
+
+          if not urgent_cves:
+              print("즉시 조치 필요한 CVE 없음 ✅")
+              exit(0)
+
+          for cve in urgent_cves:
+              title = f"[CVE] {cve['cve']} - {cve['severity']} (EPSS: {cve['epss']})"
+              body = f"""## 🚨 즉시 조치 필요
+
+          **CVE ID:** {cve['cve']}
+          **심각도:** {cve['severity']}
+          **EPSS:** {cve['epss']}
+          **VEX 상태:** affected
+
+          ## 조치 방법
+          영향받는 패키지를 최신 버전으로 업그레이드하세요.
+
+          ## 참고
+          - [NVD 상세](https://nvd.nist.gov/vuln/detail/{cve['cve']})
+          - [EPSS 점수](https://api.first.org/data/v1/epss?cve={cve['cve']})
+          """
+
+              data = json.dumps({
+                  'title': title,
+                  'body': body,
+                  'labels': ['security', 'vulnerability']
+              }).encode()
+
+              req = urllib.request.Request(
+                  f'https://api.github.com/repos/{repo}/issues',
+                  data=data,
+                  headers={
+                      'Authorization': f'token {token}',
+                      'Content-Type': 'application/json',
+                      'Accept': 'application/vnd.github.v3+json'
+                  }
+              )
+
+              try:
+                  with urllib.request.urlopen(req) as res:
+                      result = json.load(res)
+                      print(f"✅ Issue 생성됨: {result['html_url']}")
+              except Exception as e:
+                  print(f"⚠️ Issue 생성 실패: {e}")
+          EOF
