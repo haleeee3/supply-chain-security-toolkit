@@ -13,6 +13,8 @@ SCA 도구로 추출한 CVE 리스트를 입력받아, 공개된 PoC/Exploit 참
                               CVE ID로 매칭. API 제한 없음, 선택적)
   4. NVD References          (NVD API 2.0에서 해당 CVE의 references 중 tags에 "Exploit"이
                               포함된 링크만 추출. 선택적, API 요청 제한 있음)
+  5. Vulhub                  (vulhub/vulhub 저장소에서 CVE별 Docker 환경 검색, 선택적)
+  6. CISA KEV                (CISA Known Exploited Vulnerabilities 목록 체크, 선택적)
 
 사용법:
   1) CVE 목록을 텍스트 파일로 준비 (한 줄에 하나, 예: CVE-2021-44228)
@@ -29,9 +31,15 @@ SCA 도구로 추출한 CVE 리스트를 입력받아, 공개된 PoC/Exploit 참
        export NVD_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
        python cve_poc_collector.py --input cve_list.txt --use-nvd
 
+  5) Vulhub Docker 환경까지 검색하려면 --use-vulhub 추가 (GITHUB_TOKEN 권장)
+       python cve_poc_collector.py --input cve_list.txt --use-vulhub
+
+  6) CISA KEV 목록 체크까지 하려면 --use-cisa-kev 추가
+       python cve_poc_collector.py --input cve_list.txt --use-cisa-kev
+
   전부 함께 쓰는 예:
        python cve_poc_collector.py --input cve_list.txt --output results.json \
-           --use-github-search --use-exploitdb --use-nvd
+           --use-github-search --use-exploitdb --use-nvd --use-vulhub --use-cisa-kev
 
 출력:
   results.json  - CVE별 매칭된 PoC/Exploit 참조 목록(URL, star 수, 설명, 출처 등)
@@ -59,11 +67,12 @@ NOMI_SEC_BASE = "https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master
 GITHUB_SEARCH_API = "https://api.github.com/search/repositories"
 NVD_API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 EXPLOITDB_CSV_URL = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+VULHUB_SEARCH_API = "https://api.github.com/search/code"
+CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
 # NVD 요청 제한: API 키 없으면 30초당 5건, 있으면 30초당 50건.
-# 여유를 두고 각각 6.5초 / 0.7초 간격을 둔다.
 NVD_DELAY_NO_KEY = 6.5
 NVD_DELAY_WITH_KEY = 0.7
 
@@ -76,7 +85,6 @@ def load_cve_list(path):
             match = CVE_PATTERN.search(line)
             if match:
                 cves.append(match.group(0).upper())
-    # 중복 제거, 순서 유지
     seen = set()
     unique = []
     for c in cves:
@@ -87,7 +95,7 @@ def load_cve_list(path):
 
 
 def fetch_raw(url, headers=None, retries=3, backoff=2):
-    """재시도 로직을 포함한 GET 요청. 응답 바이트를 그대로 반환 (JSON/CSV 공용)."""
+    """재시도 로직을 포함한 GET 요청. 응답 바이트를 그대로 반환."""
     req = urllib.request.Request(url, headers=headers or {})
     for attempt in range(1, retries + 1):
         try:
@@ -95,7 +103,7 @@ def fetch_raw(url, headers=None, retries=3, backoff=2):
                 return resp.read()
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                return None  # 대상 리소스 없음
+                return None
             if e.code == 429:
                 print(f"  [경고] HTTP 429 (rate limit): {url} - 대기 후 재시도", file=sys.stderr)
                 time.sleep(backoff * attempt * 3)
@@ -133,10 +141,7 @@ def fetch_text(url, headers=None, retries=3, backoff=2):
 
 
 def query_nomi_sec(cve_id):
-    """
-    nomi-sec/PoC-in-GitHub 은 연도별 디렉토리에 CVE-YYYY-NNNNN.json 파일로
-    PoC 저장소 목록을 저장해둠. 해당 파일을 직접 raw로 가져온다.
-    """
+    """nomi-sec/PoC-in-GitHub에서 CVE별 PoC 저장소 조회."""
     year_match = re.match(r"CVE-(\d{4})-", cve_id)
     if not year_match:
         return []
@@ -159,7 +164,7 @@ def query_nomi_sec(cve_id):
 
 
 def query_github_search(cve_id, token):
-    """GitHub 저장소 검색 API로 CVE ID를 이름/설명에 포함한 저장소를 보조 검색."""
+    """GitHub 저장소 검색 API로 CVE ID를 이름/설명에 포함한 저장소 보조 검색."""
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github+json",
@@ -183,11 +188,7 @@ def query_github_search(cve_id, token):
 
 
 def load_exploitdb_index(cache_path, force_refresh=False):
-    """
-    offensive-security/exploitdb 저장소의 files_exploits.csv를 로컬에 캐시하고,
-    CVE ID -> [해당 exploit-db row, ...] 매핑을 만들어 반환한다.
-    (CSV의 'codes' 컬럼에 세미콜론으로 구분된 CVE-YYYY-NNNNN 값들이 들어있음)
-    """
+    """Exploit-DB CSV 인덱스를 로컬에 캐시하고 CVE ID -> row 매핑 반환."""
     text = None
     if not force_refresh and os.path.exists(cache_path):
         try:
@@ -200,8 +201,7 @@ def load_exploitdb_index(cache_path, force_refresh=False):
         print(f"  [정보] Exploit-DB 인덱스 다운로드 중... ({EXPLOITDB_CSV_URL})", file=sys.stderr)
         text = fetch_text(EXPLOITDB_CSV_URL)
         if text is None:
-            print("  [경고] Exploit-DB 인덱스를 받지 못했습니다. --use-exploitdb 결과 없이 진행합니다.",
-                  file=sys.stderr)
+            print("  [경고] Exploit-DB 인덱스를 받지 못했습니다.", file=sys.stderr)
             return None
         try:
             with open(cache_path, "w", encoding="utf-8") as f:
@@ -240,10 +240,7 @@ def query_exploitdb(cve_id, exploitdb_index):
 
 
 def query_nvd(cve_id, api_key=None):
-    """
-    NVD API 2.0에서 CVE 상세 정보를 조회하고, references 중 tags에
-    'Exploit'이 포함된 것만 골라 반환한다 (벤더 어드바이저리 등 잡음 제거).
-    """
+    """NVD API 2.0에서 references 중 Exploit 태그가 있는 것만 반환."""
     headers = {}
     if api_key:
         headers["apiKey"] = api_key
@@ -271,9 +268,93 @@ def query_nvd(cve_id, api_key=None):
     return results
 
 
+def query_vulhub(cve_id, token=None):
+    """
+    Vulhub 저장소에서 CVE ID로 Docker 환경 검색.
+    vulhub/vulhub 저장소 구조: /product/CVE-YYYY-NNNNN/
+    """
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    query = urllib.parse.quote(f"{cve_id} repo:vulhub/vulhub")
+    url = f"{VULHUB_SEARCH_API}?q={query}&per_page=5"
+
+    data = fetch_json(url, headers=headers)
+    if not data or not data.get("items"):
+        return []
+
+    results = []
+    seen = set()
+    for item in data["items"]:
+        path = item.get("path", "")
+        if cve_id.upper() in path.upper():
+            # 폴더 경로 추출 (product/CVE-YYYY-NNNNN)
+            parts = path.split("/")
+            if len(parts) >= 2:
+                folder = "/".join(parts[:2])
+                if folder not in seen:
+                    seen.add(folder)
+                    results.append({
+                        "source": "vulhub",
+                        "repo_url": f"https://github.com/vulhub/vulhub/tree/master/{folder}",
+                        "description": f"Vulhub Docker 환경: {folder}",
+                        "stars": None,
+                        "created_at": None,
+                        "has_docker": True,
+                    })
+    return results
+
+
+def load_cisa_kev():
+    """CISA KEV(Known Exploited Vulnerabilities) 목록 로드."""
+    print("  [정보] CISA KEV 목록 로드 중...", file=sys.stderr)
+    data = fetch_json(CISA_KEV_URL)
+    if not data:
+        print("  [경고] CISA KEV 목록을 받지 못했습니다.", file=sys.stderr)
+        return {}
+
+    kev_map = {}
+    for vuln in data.get("vulnerabilities", []):
+        cve_id = vuln.get("cveID", "").upper()
+        if cve_id:
+            kev_map[cve_id] = {
+                "vendor": vuln.get("vendorProject"),
+                "product": vuln.get("product"),
+                "due_date": vuln.get("dueDate"),
+                "ransomware": vuln.get("knownRansomwareCampaignUse", "Unknown"),
+                "short_description": vuln.get("shortDescription", ""),
+            }
+    print(f"  [정보] CISA KEV 로드 완료: {len(kev_map)}개", file=sys.stderr)
+    return kev_map
+
+
+def query_cisa_kev(cve_id, kev_data):
+    """CISA KEV에 있는지 확인."""
+    info = kev_data.get(cve_id.upper())
+    if not info:
+        return []
+
+    return [{
+        "source": "cisa-kev",
+        "repo_url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+        "description": (
+            f"⚠️ 실제 공격에 사용됨! "
+            f"제품: {info['vendor']} {info['product']} | "
+            f"랜섬웨어 연관: {info['ransomware']} | "
+            f"패치 기한: {info['due_date']}"
+        ),
+        "stars": None,
+        "created_at": info["due_date"],
+        "is_kev": True,
+    }]
+
+
 def collect(cve_list, use_github_search=False, github_token=None,
             use_exploitdb=False, exploitdb_index=None,
             use_nvd=False, nvd_api_key=None,
+            use_vulhub=False,
+            use_cisa_kev=False, kev_data=None,
             sleep_sec=0.5):
     all_results = {}
     total = len(cve_list)
@@ -291,14 +372,29 @@ def collect(cve_list, use_github_search=False, github_token=None,
 
         if not pocs and use_nvd:
             pocs = query_nvd(cve_id, nvd_api_key)
-            time.sleep(nvd_delay)  # NVD 레이트리밋 준수 (다른 소스와 별개 딜레이)
+            time.sleep(nvd_delay)
+
+        # Vulhub: Docker 환경이므로 기존 결과와 별개로 항상 추가
+        if use_vulhub:
+            vulhub_results = query_vulhub(cve_id, github_token)
+            if vulhub_results:
+                print(f"  [Vulhub] Docker 환경 {len(vulhub_results)}개 발견")
+                pocs.extend(vulhub_results)
+
+        # CISA KEV: 우선순위 판단용으로 항상 체크
+        if use_cisa_kev and kev_data:
+            kev_results = query_cisa_kev(cve_id, kev_data)
+            if kev_results:
+                print(f"  [CISA KEV] ⚠️ 실제 공격에 사용된 CVE!")
+                pocs.extend(kev_results)
 
         all_results[cve_id] = {
             "poc_count": len(pocs),
+            "is_kev": any(p.get("is_kev") for p in pocs),
+            "has_docker_env": any(p.get("has_docker") for p in pocs),
             "pocs": pocs,
         }
 
-        # API 예의상 약간의 딜레이 (특히 GitHub API rate limit 방지)
         time.sleep(sleep_sec)
 
     return all_results
@@ -312,15 +408,20 @@ def write_json(results, path):
 def write_csv(results, path):
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["CVE", "PoC 개수", "저장소/참조 URL", "Star 수", "출처", "설명"])
+        writer.writerow([
+            "CVE", "PoC 개수", "CISA KEV 여부", "Docker 환경 여부",
+            "저장소/참조 URL", "Star 수", "출처", "설명"
+        ])
         for cve_id, data in results.items():
             if not data["pocs"]:
-                writer.writerow([cve_id, 0, "", "", "", "매칭된 PoC 없음"])
+                writer.writerow([cve_id, 0, "N", "N", "", "", "", "매칭된 PoC 없음"])
                 continue
             for poc in data["pocs"]:
                 writer.writerow([
                     cve_id,
                     data["poc_count"],
+                    "Y" if data["is_kev"] else "N",
+                    "Y" if data["has_docker_env"] else "N",
                     poc.get("repo_url", ""),
                     poc.get("stars", ""),
                     poc.get("source", ""),
@@ -331,6 +432,8 @@ def write_csv(results, path):
 def print_summary(results):
     total = len(results)
     found = sum(1 for v in results.values() if v["poc_count"] > 0)
+    kev_count = sum(1 for v in results.values() if v.get("is_kev"))
+    docker_count = sum(1 for v in results.values() if v.get("has_docker_env"))
 
     by_source = {}
     for v in results.values():
@@ -342,11 +445,20 @@ def print_summary(results):
     print(f"총 CVE 수: {total}")
     print(f"PoC/참조 매칭된 CVE 수: {found}")
     print(f"미매칭 CVE 수: {total - found}")
+    print(f"CISA KEV 등재 (실제 공격에 사용): {kev_count}")
+    print(f"Docker 환경 있는 CVE: {docker_count}")
     if by_source:
         print("\n[출처별 항목 수]")
         for src, cnt in sorted(by_source.items(), key=lambda x: -x[1]):
             print(f"  - {src}: {cnt}건")
     print("=" * 50)
+
+    if kev_count > 0:
+        print("\n[⚠️ CISA KEV 등재 CVE - 즉시 조치 필요]")
+        for cve_id, data in results.items():
+            if data.get("is_kev"):
+                print(f"  - {cve_id}")
+
     if total - found > 0:
         print("\n[미매칭 CVE 목록] (수동 확인 권장)")
         for cve_id, data in results.items():
@@ -355,22 +467,28 @@ def print_summary(results):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SCA로 추출한 CVE 리스트에서 PoC/Exploit 참조 정보 수집")
+    parser = argparse.ArgumentParser(
+        description="SCA로 추출한 CVE 리스트에서 PoC/Exploit 참조 정보 수집"
+    )
     parser.add_argument("--input", required=True, help="CVE 목록 텍스트 파일 경로")
-    parser.add_argument("--output", default="results.json", help="결과 JSON 저장 경로 (기본: results.json)")
-    parser.add_argument("--csv", default="results.csv", help="결과 CSV 저장 경로 (기본: results.csv)")
+    parser.add_argument("--output", default="results.json", help="결과 JSON 저장 경로")
+    parser.add_argument("--csv", default="results.csv", help="결과 CSV 저장 경로")
     parser.add_argument("--use-github-search", action="store_true",
-                         help="nomi-sec에서 못 찾은 CVE에 대해 GitHub 검색 API로 보조 검색 (GITHUB_TOKEN 필요)")
+                        help="nomi-sec에서 못 찾은 CVE에 대해 GitHub 검색 API로 보조 검색")
     parser.add_argument("--use-exploitdb", action="store_true",
-                         help="위 소스들에서 못 찾은 CVE에 대해 Exploit-DB CSV 인덱스로 보조 검색")
+                        help="Exploit-DB CSV 인덱스로 보조 검색")
     parser.add_argument("--exploitdb-cache", default="exploitdb_files_exploits.csv",
-                         help="Exploit-DB CSV 인덱스 캐시 경로 (기본: exploitdb_files_exploits.csv)")
+                        help="Exploit-DB CSV 인덱스 캐시 경로")
     parser.add_argument("--refresh-exploitdb", action="store_true",
-                         help="캐시된 Exploit-DB 인덱스가 있어도 다시 다운로드")
+                        help="캐시된 Exploit-DB 인덱스가 있어도 다시 다운로드")
     parser.add_argument("--use-nvd", action="store_true",
-                         help="위 소스들에서 못 찾은 CVE에 대해 NVD API references(tag=Exploit)로 보조 검색")
+                        help="NVD API references(tag=Exploit)로 보조 검색")
     parser.add_argument("--nvd-api-key", default=None,
-                         help="NVD API 키 (없으면 NVD_API_KEY 환경변수 사용, 없으면 무키로 진행 - 느림)")
+                        help="NVD API 키 (없으면 NVD_API_KEY 환경변수 사용)")
+    parser.add_argument("--use-vulhub", action="store_true",
+                        help="Vulhub 저장소에서 Docker 환경 검색 추가")
+    parser.add_argument("--use-cisa-kev", action="store_true",
+                        help="CISA KEV 목록 체크 (실제 공격에 사용된 CVE 확인)")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -386,17 +504,25 @@ def main():
 
     github_token = os.environ.get("GITHUB_TOKEN")
     if args.use_github_search and not github_token:
-        print("[경고] --use-github-search 옵션을 사용했지만 GITHUB_TOKEN 환경변수가 없습니다. "
-              "보조 검색은 건너뜁니다.", file=sys.stderr)
+        print("[경고] --use-github-search 옵션을 사용했지만 GITHUB_TOKEN 환경변수가 없습니다.",
+              file=sys.stderr)
 
     exploitdb_index = None
     if args.use_exploitdb:
-        exploitdb_index = load_exploitdb_index(args.exploitdb_cache, force_refresh=args.refresh_exploitdb)
+        exploitdb_index = load_exploitdb_index(
+            args.exploitdb_cache,
+            force_refresh=args.refresh_exploitdb
+        )
 
     nvd_api_key = args.nvd_api_key or os.environ.get("NVD_API_KEY")
     if args.use_nvd and not nvd_api_key:
-        print("[경고] --use-nvd 옵션을 사용했지만 NVD API 키가 없습니다. "
-              f"무키로 진행합니다 (요청 간 {NVD_DELAY_NO_KEY}초 대기, 느림).", file=sys.stderr)
+        print(f"[경고] NVD API 키 없음. 무키로 진행합니다 (요청 간 {NVD_DELAY_NO_KEY}초 대기).",
+              file=sys.stderr)
+
+    # CISA KEV 로드
+    kev_data = None
+    if args.use_cisa_kev:
+        kev_data = load_cisa_kev()
 
     results = collect(
         cve_list,
@@ -406,6 +532,9 @@ def main():
         exploitdb_index=exploitdb_index,
         use_nvd=args.use_nvd,
         nvd_api_key=nvd_api_key,
+        use_vulhub=args.use_vulhub,
+        use_cisa_kev=args.use_cisa_kev,
+        kev_data=kev_data,
     )
 
     write_json(results, args.output)
