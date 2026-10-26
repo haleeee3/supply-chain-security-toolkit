@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 0 * * *'  # 매일 새벽 Grype DB 갱신
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
@@ -140,7 +140,7 @@ jobs:
       - name: 보안 보고서 생성
         run: |
           python3 scripts/generate_report.py cve-results.json
-      
+
       - name: SBOM/CVE/EPSS 결과 아티팩트 저장
         uses: actions/upload-artifact@v4
         with:
@@ -215,7 +215,7 @@ jobs:
                   import traceback
                   print(f"⚠️ Issue 생성 실패: {e}")
                   traceback.print_exc()
-              EOF
+          EOF
 
       - name: Slack 알림
         if: env.SLACK_WEBHOOK != ''
@@ -240,7 +240,6 @@ jobs:
               print("즉시 조치 필요한 CVE 없음 ✅")
               exit(0)
 
-          # 메시지 구성
           cve_list = "\n".join([
               f"• {c['cve']} | {c['severity']} | EPSS: {c['epss']}"
               for c in urgent_cves
