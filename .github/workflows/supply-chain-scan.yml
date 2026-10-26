@@ -130,6 +130,10 @@ jobs:
               json.dump(critical_epss, f, indent=2)
           EOF
 
+      - name: 보안 보고서 생성
+        run: |
+          python3 scripts/generate_report.py cve-results.json
+      
       - name: SBOM/CVE/EPSS 결과 아티팩트 저장
         uses: actions/upload-artifact@v4
         with:
@@ -138,6 +142,7 @@ jobs:
             sbom.json
             cve-results.json
             epss-results.json
+            security-report.json
 
       - name: GitHub Issues 자동 생성
         if: always()
