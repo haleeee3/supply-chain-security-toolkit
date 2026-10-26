@@ -19,11 +19,20 @@ jobs:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
 
+      - name: Syft/Grype 바이너리 캐시
+        uses: actions/cache@v4
+        id: tools-cache
+        with:
+          path: /usr/local/bin
+          key: tools-${{ runner.os }}-syft-grype
+
       - name: Syft 설치
+        if: steps.tools-cache.outputs.cache-hit != 'true'
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Grype 설치
+        if: steps.tools-cache.outputs.cache-hit != 'true'
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
