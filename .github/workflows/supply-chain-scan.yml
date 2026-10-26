@@ -57,14 +57,16 @@ jobs:
 
       - name: SBOM 생성
         run: |
-          syft . -o json > sbom.json
-          syft . -o table
+          syft file:requirements.txt -o json > sbom.json
+          syft file:requirements.txt -o table
           echo "✅ SBOM 생성 완료"
 
       - name: CVE 스캔
         run: |
-          grype sbom:sbom.json --by-cve -o json > cve-results.json
-          grype sbom:sbom.json --by-cve -o table
+          grype file:requirements.txt --by-cve \
+            -o json > cve-results.json
+          grype file:requirements.txt --by-cve \
+            -o table
           echo "✅ CVE 스캔 완료"
 
       - name: Critical/High CVE 확인
