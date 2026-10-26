@@ -3,8 +3,6 @@ name: Supply Chain Security Scan
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'requirements.txt'
   schedule:
     - cron: '0 0 * * *'  # 매일 새벽 Grype DB 갱신
   workflow_dispatch:
