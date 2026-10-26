@@ -206,4 +206,73 @@ jobs:
                   import traceback
                   print(f"⚠️ Issue 생성 실패: {e}")
                   traceback.print_exc()
+              EOF
+
+      - name: Slack 알림
+        if: env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          python3 << 'EOF'
+          import json
+          import urllib.request
+          import os
+
+          webhook_url = os.environ['SLACK_WEBHOOK']
+
+          try:
+              with open('epss-results.json') as f:
+                  urgent_cves = json.load(f)
+          except:
+              print("EPSS 결과 없음")
+              exit(0)
+
+          if not urgent_cves:
+              print("즉시 조치 필요한 CVE 없음 ✅")
+              exit(0)
+
+          # 메시지 구성
+          cve_list = "\n".join([
+              f"• {c['cve']} | {c['severity']} | EPSS: {c['epss']}"
+              for c in urgent_cves
+          ])
+
+          message = {
+              "blocks": [
+                  {
+                      "type": "header",
+                      "text": {
+                          "type": "plain_text",
+                          "text": "🚨 즉시 조치 필요한 CVE 발견!"
+                      }
+                  },
+                  {
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": f"*발견된 CVE:*\n{cve_list}"
+                      }
+                  },
+                  {
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": f"*저장소:* `{os.environ.get('GITHUB_REPOSITORY', '')}`\n*상세 보기:* <https://github.com/{os.environ.get('GITHUB_REPOSITORY', '')}/issues|GitHub Issues>"
+                      }
+                  }
+              ]
+          }
+
+          data = json.dumps(message).encode()
+          req = urllib.request.Request(
+              webhook_url,
+              data=data,
+              headers={'Content-Type': 'application/json'}
+          )
+
+          try:
+              with urllib.request.urlopen(req) as res:
+                  print(f"✅ Slack 알림 전송 완료!")
+          except Exception as e:
+              print(f"⚠️ Slack 알림 실패: {e}")
           EOF
